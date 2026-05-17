@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
 import { Button } from "@/components/ui/button";
 
 export function AuthButton() {
+  const router = useRouter();
   const [user, setUser] = useState<any>(null);
   const supabase = createClient();
 
@@ -22,19 +24,14 @@ export function AuthButton() {
     return () => subscription.unsubscribe();
   }, [supabase.auth]);
 
-  const handleSignIn = async () => {
-    // Basic Google OAuth or magic link. We will use Google as an example, 
-    // but without configuration it might fail gracefully.
-    await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: {
-        redirectTo: window.location.origin,
-      },
-    });
+  const handleSignIn = () => {
+    router.push("/login");
   };
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
+    router.push("/");
+    router.refresh();
   };
 
   if (user) {

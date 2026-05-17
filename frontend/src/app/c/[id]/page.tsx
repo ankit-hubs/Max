@@ -2,7 +2,11 @@
 
 import { Suspense, useState, useRef, useEffect, useCallback } from "react";
 import { useSearchParams, useParams, useRouter } from "next/navigation";
-import { Menu, X, Shield, Paperclip, ArrowUp, Link as LinkIcon, RotateCcw, ChevronDown, Check, MessageSquare, Trash2 } from "lucide-react";
+import {
+  Menu, X, Shield, Paperclip, ArrowUp, Link as LinkIcon, RotateCcw,
+  ChevronDown, Check, MessageSquare, Trash2, Bookmark, BookmarkCheck,
+  Mic, MicOff, Edit2,
+} from "lucide-react";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -10,32 +14,47 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { createClient } from "@/utils/supabase/client";
 import { cn } from "@/lib/utils";
+import { MarkdownRenderer } from "@/components/MarkdownRenderer";
+import { CopyButton } from "@/components/CopyButton";
+import { CitationsDisplay } from "@/components/CitationsDisplay";
+import { ConfidenceScore } from "@/components/ConfidenceScore";
+import { TypingIndicator } from "@/components/TypingIndicator";
+import { ChatSkeleton } from "@/components/Skeletons";
+import { ChatActions } from "@/components/ChatActions";
+import { FeedbackButtons } from "@/components/FeedbackButtons";
+import { ChatSearch } from "@/components/ChatSearch";
+import { ThemeToggle } from "@/components/ThemeToggle";
+import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
+import { useVoiceInput } from "@/hooks/useVoiceInput";
+import { useFeedback } from "@/hooks/useFeedback";
+import { useUsageStats } from "@/hooks/useUsageStats";
+import { useBookmarks } from "@/hooks/useBookmarks";
 
-const FOCUS_MODES = ["Default", "Academic", "News", "Internal", "Deep Research"];
-
-type Message = {
+export type Message = {
   role: "user" | "assistant";
   content: string;
 };
 
-type Citation = {
+export type Citation = {
   title: string;
   url: string;
 };
 
-type ChatTurn = {
+export type ChatTurn = {
   message: Message;
   citations?: Citation[];
   confidenceScore?: number;
   isLoading?: boolean;
 };
 
+const FOCUS_MODES = ["Default", "Academic", "News", "Internal", "Deep Research"];
+
 function ChatComponent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const params = useParams();
   const supabase = createClient();
-  
+
   const initialQuery = searchParams.get("q");
   const initialMode = searchParams.get("mode") || "Default";
 
@@ -46,10 +65,20 @@ function ChatComponent() {
   const [initialized, setInitialized] = useState(false);
   const [user, setUser] = useState<any>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [chatList, setChatList] = useState<{ id: string; title: string; updated_at: string }[]>([]);
+  const [chatList, setChatList] = useState<{ id: string; title: string; updated_at: string; is_bookmarked: boolean }[]>([]);
+  const [filteredChatList, setFilteredChatList] = useState<typeof chatList>([]);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [isBookmarked, setIsBookmarked] = useState(false);
+  const [typingStatus, setTypingStatus] = useState<string | null>(null);
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editContent, setEditContent] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const { isListening, transcript, isSupported, startListening, stopListening, resetTranscript } = useVoiceInput();
+  const { feedback, submitFeedback, loadFeedback } = useFeedback();
+  const { incrementStat } = useUsageStats();
+  const { toggleBookmark } = useBookmarks();
 
   useEffect(() => {
     const fetchUser = async () => {
@@ -59,38 +88,42 @@ function ChatComponent() {
     fetchUser();
   }, [supabase.auth]);
 
-  // Handle initial load with search params or fetch from DB
+  useEffect(() => {
+    if (transcript) {
+      setQuery(transcript);
+    }
+  }, [transcript]);
+
   useEffect(() => {
     const initChat = async () => {
       if (initialized) return;
 
       if (initialQuery) {
-        // Clean URL params to avoid re-triggering on refresh
         window.history.replaceState({}, '', `/c/${params.id}`);
         setInitialized(true);
         handleChat(initialQuery, initialMode);
       } else {
-        // Try fetching existing chat
         const { data: { session } } = await supabase.auth.getSession();
         if (session?.user) {
           const { data, error } = await supabase
             .from("chats")
-            .select("history, title")
+            .select("history, title, is_bookmarked")
             .eq("id", params.id)
             .single();
-            
+
           if (data && data.history) {
             setChatHistory(data.history);
+            setIsBookmarked(data.is_bookmarked || false);
+            loadFeedback(params.id as string);
           }
         }
         setInitialized(true);
       }
     };
-    
+
     initChat();
   }, [initialQuery, initialMode, initialized, params.id, supabase]);
 
-  // Auto-scroll to bottom
   useEffect(() => {
     if (scrollRef.current) {
       const scrollElement = scrollRef.current.querySelector('[data-radix-scroll-area-viewport]');
@@ -111,7 +144,7 @@ function ChatComponent() {
         history: historyToSave,
         updated_at: new Date().toISOString(),
       };
-      
+
       if (firstMessageText) {
         payload.title = firstMessageText.substring(0, 50);
       }
@@ -124,7 +157,7 @@ function ChatComponent() {
 
   const handleChat = async (text: string, currentMode: string) => {
     if ((!text.trim() && !selectedFile) || isSearching) return;
-    
+
     let fileData: string | undefined;
     let fileType: string | undefined;
     if (selectedFile) {
@@ -136,10 +169,11 @@ function ChatComponent() {
     const currentHistory = [...chatHistory];
     const newHistory: ChatTurn[] = [...currentHistory, { message: userMsg }];
     const isFirstMessage = currentHistory.length === 0;
-    
+
     setChatHistory([...newHistory, { message: { role: "assistant", content: "" }, isLoading: true }]);
     setSelectedFile(null);
     setIsSearching(true);
+    setTypingStatus("Analyzing your query...");
 
     try {
       const response = await fetch("/api/chat", {
@@ -157,29 +191,37 @@ function ChatComponent() {
         throw new Error("Failed to fetch response");
       }
 
+      setTypingStatus("Searching the web...");
+
       const data = await response.json();
-      
+
+      setTypingStatus("Generating response...");
+
       const completedHistory: ChatTurn[] = [
         ...newHistory,
-        { 
+        {
           message: { role: "assistant", content: data.response },
           citations: data.citations,
-          confidenceScore: data.confidence_score
+          confidenceScore: data.confidence_score,
         }
       ];
-      
+
       setChatHistory(completedHistory);
-      
+      setTypingStatus(null);
+
       saveToSupabase(completedHistory, isFirstMessage ? text : undefined);
+      incrementStat("total_queries");
+      if (data.citations?.length > 0) incrementStat("total_searches");
 
     } catch (error) {
       console.error(error);
       setChatHistory([
         ...newHistory,
-        { 
+        {
           message: { role: "assistant", content: "Sorry, I encountered an error while processing your request. Please ensure the backend is running and API keys are set." }
         }
       ]);
+      setTypingStatus(null);
     } finally {
       setIsSearching(false);
     }
@@ -193,7 +235,7 @@ function ChatComponent() {
   };
 
   const handleNewChat = () => {
-    router.push("/");
+    router.push(`/c/${crypto.randomUUID()}`);
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -221,11 +263,14 @@ function ChatComponent() {
     if (!session?.user) return;
     const { data } = await supabase
       .from("chats")
-      .select("id, title, updated_at")
+      .select("id, title, updated_at, is_bookmarked")
       .eq("user_id", session.user.id)
       .order("updated_at", { ascending: false })
       .limit(50);
-    if (data) setChatList(data);
+    if (data) {
+      setChatList(data);
+      setFilteredChatList(data);
+    }
   }, [supabase]);
 
   useEffect(() => {
@@ -236,12 +281,146 @@ function ChatComponent() {
     e.stopPropagation();
     await supabase.from("chats").delete().eq("id", chatId);
     setChatList(prev => prev.filter(c => c.id !== chatId));
+    setFilteredChatList(prev => prev.filter(c => c.id !== chatId));
+    if (chatId === params.id) {
+      router.push("/");
+    }
   };
 
   const handleSelectChat = (chatId: string) => {
     setSidebarOpen(false);
     router.push(`/c/${chatId}`);
   };
+
+  const handleSearchChats = (searchQuery: string) => {
+    if (!searchQuery.trim()) {
+      setFilteredChatList(chatList);
+    } else {
+      setFilteredChatList(
+        chatList.filter(c =>
+          (c.title || "").toLowerCase().includes(searchQuery.toLowerCase())
+        )
+      );
+    }
+  };
+
+  const handleClearSearch = () => {
+    setFilteredChatList(chatList);
+  };
+
+  const handleToggleBookmark = async () => {
+    await toggleBookmark(params.id as string, isBookmarked);
+    setIsBookmarked(!isBookmarked);
+  };
+
+  const handleRetry = async (index: number) => {
+    const prevTurn = chatHistory[index - 1];
+    if (!prevTurn || prevTurn.message.role !== "user") return;
+
+    const newHistory = chatHistory.slice(0, index);
+    setChatHistory([...newHistory, { message: { role: "assistant", content: "" }, isLoading: true }]);
+    setIsSearching(true);
+    setTypingStatus("Retrying...");
+
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: newHistory.slice(0, -1).map(t => t.message).concat([prevTurn.message]),
+          focus_mode: focusMode,
+        }),
+      });
+
+      const data = await response.json();
+
+      const completedHistory: ChatTurn[] = [
+        ...newHistory.slice(0, -1),
+        {
+          message: { role: "assistant", content: data.response },
+          citations: data.citations,
+          confidenceScore: data.confidence_score,
+        }
+      ];
+
+      setChatHistory(completedHistory);
+      saveToSupabase(completedHistory);
+    } catch (error) {
+      console.error(error);
+      setChatHistory([
+        ...newHistory.slice(0, -1),
+        { message: { role: "assistant", content: "Retry failed. Please try again." } }
+      ]);
+    } finally {
+      setIsSearching(false);
+      setTypingStatus(null);
+    }
+  };
+
+  const handleEditMessage = async (index: number, newContent: string) => {
+    const newHistory = chatHistory.slice(0, index);
+    newHistory.push({ message: { role: "user", content: newContent } });
+    setChatHistory([...newHistory, { message: { role: "assistant", content: "" }, isLoading: true }]);
+    setIsSearching(true);
+    setTypingStatus("Processing edited message...");
+
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: newHistory.map(t => t.message),
+          focus_mode: focusMode,
+        }),
+      });
+
+      const data = await response.json();
+
+      const completedHistory: ChatTurn[] = [
+        ...newHistory,
+        {
+          message: { role: "assistant", content: data.response },
+          citations: data.citations,
+          confidenceScore: data.confidence_score,
+        }
+      ];
+
+      setChatHistory(completedHistory);
+      saveToSupabase(completedHistory);
+    } catch (error) {
+      console.error(error);
+      setChatHistory([
+        ...newHistory,
+        { message: { role: "assistant", content: "Failed to process edited message." } }
+      ]);
+    } finally {
+      setIsSearching(false);
+      setTypingStatus(null);
+    }
+  };
+
+  const toggleVoice = () => {
+    if (isListening) {
+      stopListening();
+    } else {
+      resetTranscript();
+      startListening();
+    }
+  };
+
+  useKeyboardShortcuts({
+    "ctrl+n": () => handleNewChat(),
+    "meta+n": () => handleNewChat(),
+    "escape": () => setSidebarOpen(false),
+    "ctrl+k": () => {
+      const input = document.querySelector('input[placeholder="Ask a follow-up..."]') as HTMLInputElement;
+      input?.focus();
+    },
+    "meta+k": () => {
+      const input = document.querySelector('input[placeholder="Ask a follow-up..."]') as HTMLInputElement;
+      input?.focus();
+    },
+  }, initialized);
 
   if (!initialized) return null;
 
@@ -257,18 +436,23 @@ function ChatComponent() {
                 <X className="h-4 w-4" />
               </Button>
             </div>
+            <ChatSearch onSearch={handleSearchChats} onClear={handleClearSearch} />
             <ScrollArea className="flex-1">
               <div className="p-2 space-y-1">
-                {chatList.length === 0 && (
+                {filteredChatList.length === 0 && (
                   <p className="text-xs text-muted-foreground text-center py-8">No chats yet</p>
                 )}
-                {chatList.map(chat => (
+                {filteredChatList.map(chat => (
                   <div
                     key={chat.id}
                     onClick={() => handleSelectChat(chat.id)}
                     className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer text-sm hover:bg-muted transition-colors group ${chat.id === params.id ? "bg-muted" : ""}`}
                   >
-                    <MessageSquare className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
+                    {chat.is_bookmarked ? (
+                      <BookmarkCheck className="h-4 w-4 flex-shrink-0 text-yellow-500" />
+                    ) : (
+                      <MessageSquare className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
+                    )}
                     <span className="truncate flex-1">{chat.title || "Untitled"}</span>
                     <button
                       onClick={(e) => handleDeleteChat(chat.id, e)}
@@ -315,41 +499,84 @@ function ChatComponent() {
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <ThemeToggle />
+            <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => router.push("/profile")}>
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+            </Button>
             <Button variant="ghost" size="sm" onClick={handleNewChat} className="gap-2 text-muted-foreground">
               <RotateCcw className="w-4 h-4" /> New Chat
             </Button>
+            {chatHistory.length > 0 && (
+              <ChatActions
+                chatId={params.id as string}
+                chatTitle={chatHistory[0]?.message.content?.substring(0, 50) || "Chat"}
+                chatHistory={chatHistory}
+                isBookmarked={isBookmarked}
+                onDelete={() => handleDeleteChat(params.id as string, {} as any)}
+              />
+            )}
           </div>
         </header>
-        
+
         <ScrollArea className="flex-1 pr-4 py-8" ref={scrollRef}>
-          <div className="space-y-8 pb-12">
-            {chatHistory.map((turn, idx) => (
-              <div key={idx} className={`flex flex-col ${turn.message.role === "user" ? "items-end" : "items-start"}`}>
-                <div className={`max-w-[85%] rounded-3xl px-5 py-4 ${
-                  turn.message.role === "user" 
-                    ? "bg-primary text-primary-foreground" 
-                    : "bg-muted/50 text-foreground"
-                }`}>
-                  {turn.isLoading ? (
-                    <div className="flex gap-1.5 items-center text-muted-foreground h-6">
-                      <div className="w-2 h-2 rounded-full bg-current animate-bounce" />
-                      <div className="w-2 h-2 rounded-full bg-current animate-bounce delay-75" />
-                      <div className="w-2 h-2 rounded-full bg-current animate-bounce delay-150" />
-                    </div>
-                  ) : (
-                    <div className="prose prose-sm md:prose-base dark:prose-invert">
-                      {turn.message.content.split('\n').map((line, i) => (
-                        <p key={i} className="mb-2 last:mb-0 leading-relaxed">{line}</p>
-                      ))}
+          {chatHistory.length === 0 && !isSearching ? (
+            <ChatSkeleton />
+          ) : (
+            <div className="space-y-8 pb-12">
+              {chatHistory.map((turn, idx) => (
+                <div key={idx} className={`flex flex-col group ${turn.message.role === "user" ? "items-end" : "items-start"}`}>
+                  <div className={`max-w-[85%] rounded-3xl px-5 py-4 ${
+                    turn.message.role === "user"
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted/50 text-foreground"
+                  }`}>
+                    {turn.isLoading ? (
+                      <TypingIndicator status={typingStatus || undefined} />
+                    ) : (
+                      <>
+                        {turn.message.role === "assistant" ? (
+                          <MarkdownRenderer content={turn.message.content} />
+                        ) : (
+                          <p className="leading-relaxed">{turn.message.content}</p>
+                        )}
+                      </>
+                    )}
+                  </div>
+
+                  {!turn.isLoading && turn.message.role === "assistant" && (
+                    <div className="flex items-center gap-2 mt-2 max-w-[85%]">
+                      <CopyButton text={turn.message.content} />
+                      {turn.confidenceScore && (
+                        <ConfidenceScore score={turn.confidenceScore} />
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                        onClick={() => handleRetry(idx)}
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                      </Button>
                     </div>
                   )}
-                </div>
-                
 
-              </div>
-            ))}
-          </div>
+                  {turn.citations && !turn.isLoading && (
+                    <CitationsDisplay citations={turn.citations} />
+                  )}
+
+                  {!turn.isLoading && turn.message.role === "assistant" && (
+                    <FeedbackButtons
+                      chatId={params.id as string}
+                      messageIndex={idx}
+                      currentFeedback={feedback[`${params.id}-${idx}`]}
+                      onFeedback={(rating, comment) => submitFeedback(params.id as string, idx, rating, comment)}
+                    />
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </ScrollArea>
 
         <div className="pt-4 mt-auto border-t bg-background">
@@ -360,6 +587,12 @@ function ChatComponent() {
               <button onClick={() => setSelectedFile(null)} className="hover:text-foreground ml-1">&times;</button>
             </div>
           )}
+          {isListening && (
+            <div className="px-1 pb-2 text-xs text-red-500 flex items-center gap-2 animate-pulse">
+              <Mic className="h-3 w-3" />
+              <span>Listening...</span>
+            </div>
+          )}
           <form onSubmit={handleSubmit} className="relative flex items-center w-full shadow-sm rounded-3xl bg-muted/30 border focus-within:ring-2 focus-within:ring-ring focus-within:border-transparent transition-all p-1">
             <input
               ref={fileInputRef}
@@ -368,16 +601,16 @@ function ChatComponent() {
               onChange={handleFileSelect}
               className="hidden"
             />
-            <Button 
-              type="button" 
-              variant="ghost" 
-              size="icon" 
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
               onClick={() => fileInputRef.current?.click()}
               className="rounded-full text-muted-foreground hover:bg-transparent flex-shrink-0 ml-1"
             >
               <Paperclip className="h-5 w-5" />
             </Button>
-            
+
             <Input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
@@ -385,16 +618,34 @@ function ChatComponent() {
               className="flex-1 px-4 py-6 border-none shadow-none focus-visible:ring-0 text-base bg-transparent"
               disabled={isSearching}
             />
-            
-            <Button 
-              type="submit" 
-              size="icon" 
+
+            {isSupported && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={toggleVoice}
+                className={cn(
+                  "rounded-full text-muted-foreground hover:bg-transparent flex-shrink-0",
+                  isListening && "text-red-500"
+                )}
+              >
+                {isListening ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
+              </Button>
+            )}
+
+            <Button
+              type="submit"
+              size="icon"
               disabled={(!query.trim() && !selectedFile) || isSearching}
               className={`rounded-full flex-shrink-0 mr-1 transition-all ${(query.trim() || selectedFile) && !isSearching ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}
             >
               <ArrowUp className="h-5 w-5" />
             </Button>
           </form>
+          <p className="text-center text-xs text-muted-foreground mt-2">
+            Press <kbd className="px-1.5 py-0.5 bg-muted rounded text-[10px]">Ctrl+N</kbd> for new chat · <kbd className="px-1.5 py-0.5 bg-muted rounded text-[10px]">Ctrl+K</kbd> to focus input
+          </p>
         </div>
       </main>
     </div>
