@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from mangum import Mangum
 from core.config import settings
 from api.routes import chat
 
@@ -27,3 +28,5 @@ def read_root():
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+handler = Mangum(app)
