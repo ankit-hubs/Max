@@ -3,7 +3,6 @@ services:
   - type: web
     name: kai-backend
     env: python
-    rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
     envVars:
@@ -22,9 +21,8 @@ services:
   - type: web
     name: kai
     env: node
-    rootDir: frontend
     buildCommand: npm install && npm run build
-    startCommand: npm start
+    startCommand: npm run start:frontend
     envVars:
       - key: NEXT_PUBLIC_SUPABASE_URL
         sync: false
